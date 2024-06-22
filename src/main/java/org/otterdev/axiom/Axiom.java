@@ -2,7 +2,6 @@ package org.otterdev.axiom;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -10,8 +9,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.*;
 
 public final class Axiom {
 
@@ -21,21 +22,53 @@ public final class Axiom {
 
   private final String apiToken;
   private final String datasetName;
+  private ScheduledExecutorService executorService;
 
-  private final List<ObjectNode> requestBuffer = new ArrayList<>();
+  private final List<ObjectNode> requestBuffer = Collections.synchronizedList(new ArrayList<>());
 
-  private static Axiom instance;
-
-  private Axiom(String apiToken, String datasetName) {
+  private Axiom(String apiToken, String datasetName, boolean enableExecutor) {
     this.apiToken = Objects.requireNonNull(apiToken);
     this.datasetName = Objects.requireNonNull(datasetName);
+
+    if (enableExecutor) {
+      executorService = Executors.newSingleThreadScheduledExecutor();
+      executorService.scheduleAtFixedRate(() -> {
+        try {
+          publish();
+        } catch (IOException | InterruptedException e) {
+          throw new RuntimeException(e);
+        }
+      }, 0, 1, TimeUnit.SECONDS);
+    }
   }
 
-  public synchronized static Axiom createInstance(String apiToken, String datasetName) {
-    if (instance == null) {
-      instance = new Axiom(apiToken, datasetName);
+  public static class AxiomBuilder {
+    private String apiToken;
+    private String datasetName;
+    private boolean enableExecutor;
+
+    public static AxiomBuilder newInstance() {
+      return new AxiomBuilder();
     }
-    return instance;
+    
+    public AxiomBuilder setApiToken(String apiToken) {
+      this.apiToken = apiToken;
+      return this;
+    }
+
+    public AxiomBuilder setDatasetName(String datasetName) {
+      this.datasetName = datasetName;
+      return this;
+    }
+
+    public AxiomBuilder enableExecutor() {
+      this.enableExecutor = true;
+      return this;
+    }
+
+    public Axiom build() {
+      return new Axiom(apiToken, datasetName, enableExecutor);
+    }
   }
 
   public void ingest(String message) {
@@ -55,7 +88,7 @@ public final class Axiom {
     ingest(node, true);
   }
 
-  private void publish() throws IOException {
+  private void publish() throws IOException, InterruptedException {
     List<ObjectNode> batchRequests;
     synchronized (requestBuffer) {
       int bufferSize = requestBuffer.size();
@@ -69,17 +102,28 @@ public final class Axiom {
 
     String requestBody = MAPPER.writeValueAsString(batchRequests);
 
-    HttpRequest httpRequest = HttpRequest.newBuilder()
-        .uri(URI.create(String.format("https://api.axiom.co/v1/datasets/%s/ingest", datasetName)))
-        .header("Authorization", "Bearer " + apiToken)
-        .header("Content-Type", "application/json")
-        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-        .build();
+    HttpRequest httpRequest =
+        HttpRequest.newBuilder()
+            .uri(
+                URI.create(
+                    String.format("https://api.axiom.co/v1/datasets/%s/ingest", datasetName)))
+            .header("Authorization", "Bearer " + apiToken)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+            .build();
 
-    HTTP_CLIENT.sendAsync(httpRequest, HttpResponse.BodyHandlers.discarding());
+    HTTP_CLIENT.send(httpRequest, HttpResponse.BodyHandlers.discarding());
   }
 
-  public void flush() throws IOException {
+  public void flush() throws IOException, InterruptedException {
     publish();
+  }
+
+  public void shutdown() throws IOException, InterruptedException {
+    // ensure there is no pending events
+    while (!requestBuffer.isEmpty()) {
+      flush();
+    }
+    if (executorService != null) executorService.shutdown();
   }
 }
