@@ -32,13 +32,17 @@ public final class Axiom {
 
     if (enableExecutor) {
       executorService = Executors.newSingleThreadScheduledExecutor();
-      executorService.scheduleAtFixedRate(() -> {
-        try {
-          publish();
-        } catch (IOException | InterruptedException e) {
-          throw new RuntimeException(e);
-        }
-      }, 0, 1, TimeUnit.SECONDS);
+      executorService.scheduleAtFixedRate(
+          () -> {
+            try {
+              publish();
+            } catch (IOException | InterruptedException e) {
+              throw new RuntimeException(e);
+            }
+          },
+          0,
+          1,
+          TimeUnit.SECONDS);
     }
   }
 
@@ -47,45 +51,70 @@ public final class Axiom {
     private String datasetName;
     private boolean enableExecutor;
 
-    public static AxiomBuilder newInstance() {
+    public static AxiomBuilder newBuilder() {
       return new AxiomBuilder();
     }
-    
+
+    /**
+     * Sets the Axiom API Token
+     * @param apiToken API Token provided by Axiom
+     * @return this builder
+     */
     public AxiomBuilder setApiToken(String apiToken) {
       this.apiToken = apiToken;
       return this;
     }
 
+    /**
+     * Sets the Axiom dataset name
+     * @param datasetName Axiom dataset name to ingest into
+     * @return this builder
+     */
     public AxiomBuilder setDatasetName(String datasetName) {
       this.datasetName = datasetName;
       return this;
     }
 
+    /**
+     * Creates a {@link ScheduledExecutorService} to publish the events every 1 second.
+     * This is advised unless needing fine grain control over publishing
+     * @return this builder
+     */
     public AxiomBuilder enableExecutor() {
       this.enableExecutor = true;
       return this;
     }
 
+    /**
+     * Builds and returns {@link Axiom}
+     * @return A new Axiom Object
+     */
     public Axiom build() {
       return new Axiom(apiToken, datasetName, enableExecutor);
     }
   }
 
+  /**
+   * Ingest a simple message. Will populate in Axiom with the format message:your_message
+   * @param message Simple message to ingest
+   */
   public void ingest(String message) {
     ObjectNode node = MAPPER.createObjectNode();
     node.put("message", message);
-    ingest(node, true);
+    ingest(node);
   }
 
-  public void ingest(ObjectNode node, boolean addTimestamp) {
-    if (addTimestamp) {
-      node.put("@timestamp", Instant.now().toString());
-    }
+  /**
+   * Ingest an {@link Object}. Will attempt to serialize as a JSON object.
+   * @param object Java Object to ingest
+   */
+  public void ingest(Object object) {
+    ingest(MAPPER.valueToTree(object));
+  }
+
+  private void ingest(ObjectNode node) {
+    node.put("@timestamp", Instant.now().toString());
     requestBuffer.add(node);
-  }
-
-  public void ingest(ObjectNode node) {
-    ingest(node, true);
   }
 
   private void publish() throws IOException, InterruptedException {
@@ -115,13 +144,24 @@ public final class Axiom {
     HTTP_CLIENT.send(httpRequest, HttpResponse.BodyHandlers.discarding());
   }
 
-  public void flush() throws IOException, InterruptedException {
-    publish();
+  /**
+   * Publishes submitted events to Axiom. Calling this is not required if {@link AxiomBuilder#enableExecutor()} is set.
+   */
+  public void flush() {
+    try {
+      publish();
+    } catch (IOException | InterruptedException e) {
+      throw new RuntimeException("Failed to flush Axiom events", e);
+    }
   }
 
-  public void shutdown() throws IOException, InterruptedException {
+  /**
+   * Attempts to flush the remaining queued events. Shuts down the {@link ScheduledExecutorService} if created via {@link AxiomBuilder#enableExecutor()}
+   */
+  public void shutdown() {
     // ensure there is no pending events
-    while (!requestBuffer.isEmpty()) {
+    for (int i = 0; i < 10; i++) {
+      if (requestBuffer.isEmpty()) break;
       flush();
     }
     if (executorService != null) executorService.shutdown();
