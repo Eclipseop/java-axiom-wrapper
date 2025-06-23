@@ -9,7 +9,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
@@ -24,7 +23,7 @@ public final class Axiom {
   private final String datasetName;
   private ScheduledExecutorService executorService;
 
-  private final List<ObjectNode> requestBuffer = Collections.synchronizedList(new ArrayList<>());
+  private final BlockingQueue<ObjectNode> requestQueue = new LinkedBlockingQueue<>();
 
   private Axiom(String apiToken, String datasetName, boolean enableExecutor) {
     this.apiToken = Objects.requireNonNull(apiToken);
@@ -57,6 +56,7 @@ public final class Axiom {
 
     /**
      * Sets the Axiom API Token
+     * 
      * @param apiToken API Token provided by Axiom
      * @return this builder
      */
@@ -67,6 +67,7 @@ public final class Axiom {
 
     /**
      * Sets the Axiom dataset name
+     * 
      * @param datasetName Axiom dataset name to ingest into
      * @return this builder
      */
@@ -76,8 +77,10 @@ public final class Axiom {
     }
 
     /**
-     * Creates a {@link ScheduledExecutorService} to publish the events every 1 second.
+     * Creates a {@link ScheduledExecutorService} to publish the events every 1
+     * second.
      * This is advised unless needing fine grain control over publishing
+     * 
      * @return this builder
      */
     public AxiomBuilder enableExecutor() {
@@ -87,6 +90,7 @@ public final class Axiom {
 
     /**
      * Builds and returns {@link Axiom}
+     * 
      * @return A new Axiom Object
      */
     public Axiom build() {
@@ -95,7 +99,9 @@ public final class Axiom {
   }
 
   /**
-   * Ingest a simple message. Will populate in Axiom with the format message:your_message
+   * Ingest a simple message. Will populate in Axiom with the format
+   * message:your_message
+   * 
    * @param message Simple message to ingest
    */
   public void ingest(String message) {
@@ -106,6 +112,7 @@ public final class Axiom {
 
   /**
    * Ingest an {@link Object}. Will attempt to serialize as a JSON object.
+   * 
    * @param object Java Object to ingest
    */
   public void ingest(Object object) {
@@ -114,38 +121,34 @@ public final class Axiom {
 
   private void ingest(ObjectNode node) {
     node.put("@timestamp", Instant.now().toString());
-    requestBuffer.add(node);
+    requestQueue.add(node);
   }
 
   private void publish() throws IOException, InterruptedException {
-    List<ObjectNode> batchRequests;
-    synchronized (requestBuffer) {
-      int bufferSize = requestBuffer.size();
-      int batchSize = Math.min(MAX_BATCH_SIZE, bufferSize);
+    List<ObjectNode> batchRequests = new ArrayList<>();
+    requestQueue.drainTo(batchRequests, MAX_BATCH_SIZE);
 
-      batchRequests = new ArrayList<>(requestBuffer.subList(0, batchSize));
-      requestBuffer.subList(0, batchSize).clear();
+    if (batchRequests.isEmpty()) {
+      return;
     }
-
-    if (batchRequests.isEmpty()) return;
 
     String requestBody = MAPPER.writeValueAsString(batchRequests);
 
-    HttpRequest httpRequest =
-        HttpRequest.newBuilder()
-            .uri(
-                URI.create(
-                    String.format("https://api.axiom.co/v1/datasets/%s/ingest", datasetName)))
-            .header("Authorization", "Bearer " + apiToken)
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-            .build();
+    HttpRequest httpRequest = HttpRequest.newBuilder()
+        .uri(
+            URI.create(
+                String.format("https://api.axiom.co/v1/datasets/%s/ingest", datasetName)))
+        .header("Authorization", "Bearer " + apiToken)
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+        .build();
 
     HTTP_CLIENT.send(httpRequest, HttpResponse.BodyHandlers.discarding());
   }
 
   /**
-   * Publishes submitted events to Axiom. Calling this is not required if {@link AxiomBuilder#enableExecutor()} is set.
+   * Publishes submitted events to Axiom. Calling this is not required if
+   * {@link AxiomBuilder#enableExecutor()} is set.
    */
   public void flush() {
     try {
@@ -156,14 +159,20 @@ public final class Axiom {
   }
 
   /**
-   * Attempts to flush the remaining queued events. Shuts down the {@link ScheduledExecutorService} if created via {@link AxiomBuilder#enableExecutor()}
+   * Attempts to flush the remaining queued events. Shuts down the
+   * {@link ScheduledExecutorService} if created via
+   * {@link AxiomBuilder#enableExecutor()}
    */
   public void shutdown() {
     // ensure there is no pending events
     for (int i = 0; i < 10; i++) {
-      if (requestBuffer.isEmpty()) break;
+      if (requestQueue.isEmpty()) {
+        break;
+      }
       flush();
     }
-    if (executorService != null) executorService.shutdown();
+    if (executorService != null) {
+      executorService.shutdown();
+    }
   }
 }
